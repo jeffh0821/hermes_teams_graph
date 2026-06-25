@@ -18,11 +18,11 @@ User → Teams → Graph notification → msgraph_webhook :8646 → teams_graph 
 | `plugin.yaml` | Declares platform, env vars |
 | `__init__.py` | Exports `register(ctx)` |
 | `auth.py` | Token discovery: env → M365 `tokens.enc` → device code (opt-in) |
-| `graph_client.py` | Async Graph client (aiohttp) with retry, rate-limit, 401 refresh |
+| `graph_client.py` | Async Graph client (aiohttp) with retry, rate-limit, 401 refresh, `send_chat_card()` |
 | `subscription_manager.py` | Webhook subscription lifecycle (60-min expiry, auto-renew at 55 min) |
 | `models.py` | `TeamsUser`, `TeamsChatMessage` dataclasses |
-| `message_handler.py` | Graph notification → MessageEvent (handles `chats({id})` format) |
-| `adapter.py` | `BasePlatformAdapter` + all hooks + `register(ctx)` |
+| `message_handler.py` | Graph notification → MessageEvent + approval command detection |
+| `adapter.py` | `BasePlatformAdapter` + send, formatting, approvals, `register(ctx)` |
 
 ## Dependencies
 
@@ -82,13 +82,47 @@ platforms:
 3. M365 skill `tokens.enc` (auto-refreshes via MSAL)
 4. Device-code OAuth2 (**opt-in**, off by default)
 
+## Message Formatting
+
+The adapter converts LLM markdown responses to HTML before sending via Graph API (`contentType: "html"`). Supported formatting:
+
+| Markdown | HTML | Renders as |
+|----------|------|------------|
+| `**text**` | `<b>text</b>` | **Bold** |
+| `*text*` | `<i>text</i>` | *Italic* |
+| `` `code` `` | `<code>code</code>` | `Inline code` |
+| ```` ``` ``` ```` | `<pre>` | Code block |
+| Double newline | `</p><p>` | Paragraph break |
+| Single newline | `<br>` | Line break |
+
+The converter HTML-escapes all non-markdown content to prevent injection. Implemented in `adapter._format_markdown_to_html()`.
+
+## Adaptive Card Approvals
+
+Command execution approvals use Adaptive Cards with text-based reply commands. No Bot Framework registration required.
+
+**How it works:**
+1. Hermes sends an approval card with an `Action.ShowCard` button
+2. User clicks "📋 How to Respond" to reveal reply commands
+3. User replies with one of:
+   - `/approve-once {key}` — Allow this command once
+   - `/approve-session {key}` — Allow for this session
+   - `/always-allow {key}` — Always allow
+   - `/deny {key}` — Deny this command
+4. `message_handler.py` detects the command via regex and routes to `adapter.handle_approval_command()`
+5. Approval is resolved via `tools.approval`
+
+**Why not buttons?** Teams Graph API cards only support `Action.OpenUrl` and `Action.ShowCard`. `Action.Submit`, `Action.Execute`, and `Action.Http` require a Bot Framework registration.
+
+**Adaptive Card delivery:** Use `graph_client.send_chat_card(chat_id, card_json)` to send any Adaptive Card as a message attachment.
+
 ## Future Enhancements
 
 - **Absorb msgraph_webhook** — embed HTTP listener directly, eliminate two-platform requirement
 - **Independent auth** — own token storage, no M365 skill dependency
 - **Channel support** — team channel subscriptions, @mention handling
-- **Adaptive Cards** — rich interactive responses
 - **Multi-resource subscriptions** — auto-subscribe to all joined teams' channels
+- [x] ~~Adaptive Cards~~ — ✅ Implemented (Action.ShowCard + text commands for approvals, `send_chat_card()` for delivery)
 
 ## Troubleshooting
 

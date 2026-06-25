@@ -80,12 +80,12 @@ The plugin resolves tokens in order:
 teams_graph/
 ├── plugin.yaml              # Plugin manifest, env vars
 ├── __init__.py              # register(ctx) entry point
-├── adapter.py               # BasePlatformAdapter + all hooks
+├── adapter.py               # BasePlatformAdapter + send, formatting, approvals
 ├── auth.py                  # Token discovery + refresh
-├── graph_client.py          # Async Graph client (aiohttp, retry, rate-limit)
+├── graph_client.py          # Async Graph client (aiohttp, retry, rate-limit, card delivery)
 ├── subscription_manager.py  # Webhook lifecycle (60-min expiry, auto-renew)
 ├── models.py                # TeamsUser, TeamsChatMessage dataclasses
-├── message_handler.py       # Notification → MessageEvent conversion
+├── message_handler.py       # Notification → MessageEvent + approval command detection
 └── README.md                # Detailed plugin documentation
 
 tests/
@@ -107,8 +107,8 @@ tests/
 - [ ] Absorb `msgraph_webhook` — embed HTTP listener, eliminate two-platform requirement
 - [ ] Independent auth — own token storage, no M365 skill dependency
 - [ ] Channel support — team channel subscriptions, @mention handling
-- [ ] Adaptive Cards — rich interactive responses
 - [ ] Multi-resource subscriptions — auto-subscribe to all joined teams' channels
+- [x] ~~Adaptive Cards~~ — ✅ Implemented (approvals via Action.ShowCard + text commands, `send_chat_card()` delivery)
 
 ## License
 
