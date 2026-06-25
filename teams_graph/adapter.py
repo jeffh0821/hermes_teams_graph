@@ -80,8 +80,8 @@ class TeamsGraphAdapter(BasePlatformAdapter):
             graph_client=self._graph,
             self_user_id=self._self_user_id,
             on_message=lambda ev: asyncio.create_task(self.handle_message(ev)),
-            on_card_action=lambda chat_id, msg_data: asyncio.create_task(
-                self.handle_card_action(chat_id, msg_data)
+            on_approval_command=lambda chat_id, text: asyncio.create_task(
+                self.handle_approval_command(chat_id, text)
             ),
         )
 
@@ -163,6 +163,19 @@ class TeamsGraphAdapter(BasePlatformAdapter):
 
     # ── Adaptive Card Approvals ──────────────────────────────────────────
 
+    # Reply command patterns for text-based approval
+    _APPROVAL_COMMANDS = [
+        ("/approve-once", "approve_once", "once"),
+        ("/approve-session", "approve_session", "session"),
+        ("/always-allow", "approve_always", "always"),
+        ("/deny", "deny", "deny"),
+    ]
+
+    _APPROVAL_CMD_RE = _re.compile(
+        r"/(approve-once|approve-session|always-allow|deny)\s+(\S+)",
+        _re.IGNORECASE,
+    )
+
     async def send_exec_approval(
         self,
         chat_id: str,
@@ -171,22 +184,26 @@ class TeamsGraphAdapter(BasePlatformAdapter):
         description: str = "dangerous command",
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
-        """Send an Adaptive Card approval prompt with Allow/Deny buttons.
+        """Send an Adaptive Card approval prompt.
 
-        Mirrors the standard Teams plugin's ``send_exec_approval()`` but
-        uses Graph API instead of Bot Framework.  The card uses
-        ``Action.Submit`` buttons — when clicked, Teams posts the submit
-        data as a regular chat message that the subscription picks up.
+        Teams Graph API cards don't support ``Action.Submit`` or
+        ``Action.Execute`` without a Bot Framework registration.
+        Instead, the card displays the approval request and uses
+        ``Action.ShowCard`` to reveal text-reply instructions.
+
+        The user replies with one of these commands:
+            /approve-once {key}
+            /approve-session {key}
+            /always-allow {key}
+            /deny {key}
+
+        The message handler detects these commands and routes them
+        to ``handle_approval_command()``.
         """
         if self._graph is None:
             return SendResult(success=False, error="Not connected")
 
         cmd_preview = command[:2000] + "..." if len(command) > 2000 else command
-        btn_data = {
-            "session_key": session_key,
-            "cmd": command[:200] + "..." if len(command) > 200 else command,
-            "desc": description,
-        }
 
         card = {
             "type": "AdaptiveCard",
@@ -217,38 +234,43 @@ class TeamsGraphAdapter(BasePlatformAdapter):
             ],
             "actions": [
                 {
-                    "type": "Action.Submit",
-                    "title": "✅ Allow Once",
-                    "data": {
-                        **btn_data,
-                        "hermes_action": "approve_once",
+                    "type": "Action.ShowCard",
+                    "title": "📋 How to Respond",
+                    "card": {
+                        "type": "AdaptiveCard",
+                        "body": [
+                            {
+                                "type": "TextBlock",
+                                "text": "Reply with ONE of these commands:",
+                                "wrap": True,
+                                "weight": "Bolder",
+                            },
+                            {
+                                "type": "TextBlock",
+                                "text": f"`/approve-once {session_key}`",
+                                "wrap": True,
+                                "spacing": "Small",
+                            },
+                            {
+                                "type": "TextBlock",
+                                "text": f"`/approve-session {session_key}`",
+                                "wrap": True,
+                                "spacing": "Small",
+                            },
+                            {
+                                "type": "TextBlock",
+                                "text": f"`/always-allow {session_key}`",
+                                "wrap": True,
+                                "spacing": "Small",
+                            },
+                            {
+                                "type": "TextBlock",
+                                "text": f"`/deny {session_key}`",
+                                "wrap": True,
+                                "spacing": "Small",
+                            },
+                        ],
                     },
-                    "style": "positive",
-                },
-                {
-                    "type": "Action.Submit",
-                    "title": "🔄 Allow Session",
-                    "data": {
-                        **btn_data,
-                        "hermes_action": "approve_session",
-                    },
-                },
-                {
-                    "type": "Action.Submit",
-                    "title": "⭐ Always Allow",
-                    "data": {
-                        **btn_data,
-                        "hermes_action": "approve_always",
-                    },
-                },
-                {
-                    "type": "Action.Submit",
-                    "title": "❌ Deny",
-                    "data": {
-                        **btn_data,
-                        "hermes_action": "deny",
-                    },
-                    "style": "destructive",
                 },
             ],
         }
@@ -260,86 +282,39 @@ class TeamsGraphAdapter(BasePlatformAdapter):
             logger.error("send_exec_approval failed: %s", e, exc_info=True)
             return SendResult(success=False, error=str(e), retryable=True)
 
-    async def handle_card_action(self, chat_id: str, message_data: dict[str, Any]) -> Optional[SendResult]:
-        """Process an incoming card-action response message.
+    async def handle_approval_command(
+        self, chat_id: str, text: str
+    ) -> Optional[SendResult]:
+        """Process a text-based approval reply command.
 
-        Called by the message handler when a message looks like a card
-        ``Action.Submit`` response.  Detects the approval action, resolves
-        the gateway approval, and sends a confirmation card back.
+        Called by the message handler when an incoming message matches
+        an approval command pattern (e.g. ``/approve-once abc123``).
         """
-        attachments = message_data.get("attachments", [])
-        if not attachments:
+        match = self._APPROVAL_CMD_RE.search(text)
+        if not match:
             return None
 
-        action_data: dict[str, Any] = {}
-        for att in attachments:
-            ct = att.get("contentType", "")
-            if ct == "application/vnd.microsoft.card.adaptive":
-                try:
-                    content = att.get("content", "{}")
-                    if isinstance(content, str):
-                        card_content = _json.loads(content)
-                    else:
-                        card_content = content
-                    # Look for submit data in the card body
-                    actions = card_content.get("actions", [])
-                    for action in actions:
-                        data = action.get("data", {})
-                        if data.get("hermes_action"):
-                            action_data = data
-                            break
-                except Exception:
-                    continue
-            # Also check for the raw submit data in invoke payloads
-            if ct == "application/vnd.microsoft.card.adaptive":
-                continue
+        cmd_name = match.group(1).lower()
+        session_key = match.group(2)
 
-        if not action_data:
-            # Try extracting from the body content as fallback
-            body = message_data.get("body", {})
-            content = body.get("content", "")
-            if isinstance(content, str):
-                try:
-                    parsed = _json.loads(content)
-                    if isinstance(parsed, dict) and parsed.get("hermes_action"):
-                        action_data = parsed
-                except Exception:
-                    pass
+        choice = None
+        hermes_action = None
+        for prefix, action, ch in self._APPROVAL_COMMANDS:
+            if cmd_name == prefix.lstrip("/"):
+                hermes_action = action
+                choice = ch
+                break
 
-        if not action_data:
+        if not choice or not hermes_action:
             return None
-
-        return await self._process_card_action(chat_id, action_data)
-
-    async def _process_card_action(
-        self, chat_id: str, data: dict[str, Any]
-    ) -> SendResult:
-        """Resolve a card action and send a confirmation card."""
-        hermes_action = data.get("hermes_action", "")
-        session_key = data.get("session_key", "")
-
-        if not hermes_action or not session_key:
-            return SendResult(success=False, error="Missing action data")
-
-        choice_map = {
-            "approve_once": "once",
-            "approve_session": "session",
-            "approve_always": "always",
-            "deny": "deny",
-        }
-        choice = choice_map.get(hermes_action)
-        if not choice:
-            return SendResult(success=False, error=f"Unknown action: {hermes_action}")
 
         from tools.approval import has_blocking_approval, resolve_gateway_approval
 
         if not has_blocking_approval(session_key):
-            # Approval already resolved or expired — send info card
             if self._graph:
-                expired_card = self._build_result_card(
-                    data, "⚠️ Approval already resolved or expired."
+                await self._graph.send_chat_message(
+                    chat_id, "⚠️ That approval has already been resolved or expired."
                 )
-                await self._graph.send_chat_card(chat_id, expired_card)
             return SendResult(success=True, message_id="expired")
 
         resolve_gateway_approval(session_key, choice)
@@ -350,33 +325,13 @@ class TeamsGraphAdapter(BasePlatformAdapter):
             "always": "✅ Always allowed",
             "deny": "❌ Denied",
         }
-        result_card = self._build_result_card(data, label_map[choice])
+        result_text = label_map[choice]
 
-        try:
-            result = await self._graph.send_chat_card(chat_id, result_card)
-            return SendResult(success=True, message_id=result.get("id"))
-        except Exception as e:
-            logger.error("Failed to send confirmation card: %s", e)
-            return SendResult(success=False, error=str(e))
+        if self._graph:
+            # Send a simple confirmation — no need for a card here
+            await self._graph.send_chat_message(chat_id, result_text)
 
-    @staticmethod
-    def _build_result_card(data: dict[str, Any], result_text: str) -> dict[str, Any]:
-        """Build a minimal confirmation card showing the approval result."""
-        cmd = data.get("cmd", "")
-        desc = data.get("desc", "")
-        body = [{"type": "TextBlock", "text": "⚠️ Command Approval Required", "wrap": True, "weight": "Bolder"}]
-        if cmd:
-            body.append({"type": "TextBlock", "text": f"```\n{cmd}\n```", "wrap": True, "fontType": "Monospace"})
-        if desc:
-            body.append({"type": "TextBlock", "text": f"Reason: {desc}", "wrap": True, "isSubtle": True})
-        body.append({"type": "TextBlock", "text": result_text, "wrap": True, "weight": "Bolder"})
-
-        return {
-            "type": "AdaptiveCard",
-            "version": "1.4",
-            "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
-            "body": body,
-        }
+        return SendResult(success=True, message_id=session_key)
 
 
 # ── Hooks ──────────────────────────────────────────────────────────────────
