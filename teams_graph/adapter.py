@@ -131,6 +131,76 @@ class TeamsGraphAdapter(BasePlatformAdapter):
 
     # ── Send ──────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _format_markdown_to_html(text: str) -> str:
+        """Convert basic markdown to HTML suitable for Teams Graph API.
+
+        Teams renders HTML in chat messages sent via Graph API with
+        ``contentType: html``.  This converter handles the subset of
+        markdown that the LLM is instructed to produce (bold, italic,
+        code, line breaks, paragraphs, bullet lists).
+        """
+        import html as _html
+
+        out = text
+
+        # Code blocks first (preserve content inside them)
+        code_blocks = []
+        def _save_cb(m):
+            code_blocks.append(m.group(1))
+            return f"\x00CODEBLOCK{len(code_blocks)-1}\x00"
+        out = _re.sub(r"```(.*?)```", _save_cb, out, flags=_re.DOTALL)
+
+        # Inline code
+        inline_codes = []
+        def _save_ic(m):
+            inline_codes.append(m.group(1))
+            return f"\x00INLINECODE{len(inline_codes)-1}\x00"
+        out = _re.sub(r"`([^`]+)`", _save_ic, out)
+
+        # Bold
+        out = _re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", out)
+
+        # Italic
+        out = _re.sub(r"\*(.+?)\*", r"<i>\1</i>", out)
+
+        # HTML-escape remaining text (but not our markers or HTML tags)
+        parts = _re.split(r"(\x00CODEBLOCK\d+\x00|\x00INLINECODE\d+\x00|<[^>]+>)", out)
+        for i, part in enumerate(parts):
+            if not part:
+                continue
+            if part.startswith("\x00"):
+                continue
+            if part.startswith("<") and part.endswith(">"):
+                continue
+            parts[i] = _html.escape(part)
+        out = "".join(parts)
+
+        # Restore code blocks
+        for i, cb in enumerate(code_blocks):
+            escaped = _html.escape(cb)
+            out = out.replace(f"\x00CODEBLOCK{i}\x00", f"<pre>{escaped}</pre>")
+
+        # Restore inline code
+        for i, ic in enumerate(inline_codes):
+            escaped = _html.escape(ic)
+            out = out.replace(f"\x00INLINECODE{i}\x00", f"<code>{escaped}</code>")
+
+        # Paragraphs: double newlines
+        out = _re.sub(r"\n\n+", "</p><p>", out)
+
+        # Single newlines → <br>
+        out = out.replace("\n", "<br>")
+
+        # Wrap in paragraph tags
+        out = f"<p>{out}</p>"
+
+        # Clean up empty paragraphs
+        out = out.replace("<p></p>", "")
+        out = _re.sub(r"<p>(\s*<br>\s*)+</p>", "", out)
+
+        return out
+
     async def send(
         self,
         chat_id: str,
@@ -140,10 +210,16 @@ class TeamsGraphAdapter(BasePlatformAdapter):
     ) -> SendResult:
         if self._graph is None:
             return SendResult(success=False, error="Not connected")
-        if len(content) > MAX_MESSAGE_LENGTH:
-            content = content[:MAX_MESSAGE_LENGTH - 100] + "\n\n[message truncated]"
+
+        # Convert markdown to HTML for Teams rendering
+        html = self._format_markdown_to_html(content)
+        html_len = len(html)
+
+        if html_len > MAX_MESSAGE_LENGTH:
+            html = html[:MAX_MESSAGE_LENGTH - 100] + "<br><br>[message truncated]"
+
         try:
-            result = await self._graph.send_chat_message(chat_id, content)
+            result = await self._graph.send_chat_message(chat_id, html, content_type="html")
             return SendResult(success=True, message_id=result.get("id"))
         except Exception as e:
             logger.error("Failed to send to %s: %s", chat_id, e)
