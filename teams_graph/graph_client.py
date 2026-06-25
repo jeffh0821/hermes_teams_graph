@@ -158,6 +158,5 @@ class GraphClient:
                 "id": card_id,
                 "contentType": "application/vnd.microsoft.card.adaptive",
                 "content": card_str,
-                "contentUrl": None,
             }],
         })
