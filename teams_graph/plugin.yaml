@@ -1,0 +1,67 @@
+name: teams-graph-platform
+label: Microsoft Teams (Graph)
+kind: platform
+version: 0.1.0
+description: >
+  Full-identity Microsoft Teams integration via Microsoft Graph API.
+  Uses the authenticated M365 user identity (not a bot), so messages
+  appear from the real user.  Supports DMs, group chats, and channels.
+  Requires an M365 account with Teams license and Graph application
+  permissions.
+author: PEI-Genesis / Apollo AI
+requires_env:
+  - name: TEAMS_GRAPH_CLIENT_ID
+    description: "Azure AD application client ID for Graph API auth"
+    prompt: "Azure AD client ID"
+    url: "https://portal.azure.com/"
+    password: false
+  - name: TEAMS_GRAPH_TENANT_ID
+    description: "Azure AD tenant ID"
+    prompt: "Azure AD tenant ID"
+    url: "https://portal.azure.com/"
+    password: false
+optional_env:
+  - name: TEAMS_GRAPH_CLIENT_SECRET
+    description: "Azure AD application client secret (for confidential clients)"
+    prompt: "Azure AD client secret"
+    password: true
+  - name: TEAMS_GRAPH_ACCESS_TOKEN
+    description: "Pre-acquired Graph API access token (bypasses auth flow)"
+    prompt: "Graph access token (optional)"
+    password: true
+  - name: TEAMS_GRAPH_NOTIFICATION_URL
+    description: "Public HTTPS URL for Graph webhook notifications (e.g. https://ops.example.com/msgraph/webhook)"
+    prompt: "Webhook notification URL"
+    password: false
+  - name: TEAMS_GRAPH_CLIENT_STATE
+    description: "Shared secret for webhook validation (generate: openssl rand -hex 32)"
+    prompt: "Webhook client state secret"
+    password: true
+  - name: TEAMS_GRAPH_ALLOWED_USERS
+    description: "Comma-separated M365 user IDs/UPNs allowed to message the agent"
+    prompt: "Allowed users (comma-separated)"
+    password: false
+  - name: TEAMS_GRAPH_ALLOW_ALL_USERS
+    description: "Allow any M365 user to message the agent (dev only)"
+    prompt: "Allow all users? (true/false)"
+    password: false
+  - name: TEAMS_GRAPH_HOME_CHANNEL
+    description: "Default Teams chat ID for cron / notification delivery"
+    prompt: "Home channel chat ID"
+    password: false
+  - name: TEAMS_GRAPH_HOME_CHANNEL_NAME
+    description: "Display name for the Teams home channel"
+    prompt: "Home channel display name"
+    password: false
+  - name: M365_ACCESS_TOKEN
+    description: "M365 access token (shared with M365 skill if configured)"
+    prompt: "M365 access token"
+    password: true
+  - name: M365_REFRESH_TOKEN
+    description: "M365 refresh token (shared with M365 skill if configured)"
+    prompt: "M365 refresh token"
+    password: true
+  - name: M365_TOKEN_PASSWORD
+    description: "Password for decrypting M365 skill tokens.enc"
+    prompt: "M365 token password"
+    password: true
