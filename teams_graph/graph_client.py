@@ -128,3 +128,36 @@ class GraphClient:
         return await self.post(f"/teams/{team_id}/channels/{channel_id}/messages", {
             "body": {"content": content, "contentType": "text"}
         })
+
+    async def send_chat_card(
+        self, chat_id: str, card_json: dict[str, Any], fallback_text: str = ""
+    ) -> dict[str, Any]:
+        """Send a message containing an Adaptive Card attachment.
+
+        The card is delivered as an attachment on the chat message.
+        ``fallback_text`` is used as the HTML body content for clients
+        that don't render Adaptive Cards.
+        """
+        import json as _json
+
+        card_str = _json.dumps(card_json)
+        card_id = f"card_{abs(hash(card_str)) % 100000}"
+
+        html_fallback = (
+            f"<attachment id=\"{card_id}\"></attachment>"
+            if not fallback_text
+            else fallback_text
+        )
+
+        return await self.post(f"/chats/{chat_id}/messages", {
+            "body": {
+                "contentType": "html",
+                "content": html_fallback,
+            },
+            "attachments": [{
+                "id": card_id,
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": card_str,
+                "contentUrl": None,
+            }],
+        })

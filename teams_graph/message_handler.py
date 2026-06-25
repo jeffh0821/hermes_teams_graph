@@ -12,9 +12,14 @@ from .models import TeamsUser, TeamsChatMessage
 logger = logging.getLogger(__name__)
 
 OnMessageCallback = Callable[[MessageEvent], asyncio.Future | None]
+OnCardActionCallback = Callable[[str, dict[str, Any]], asyncio.Future | None]
 
 _RESOURCE_RE = re.compile(
-    r"chats[/\(](?P<chat_id>[^/)]+)[/\)]/messages[/\(](?P<message_id>[^/)]+)[/\)]?"
+    r"chats[/\\(](?P<chat_id>[^/)]+)[/\\)]/messages[/\\(](?P<message_id>[^/)]+)[/\\)]?"
+)
+
+_CARD_ACTION_RE = re.compile(
+    r"\"hermes_action\"\s*:\s*\"(approve_once|approve_session|approve_always|deny)\""
 )
 
 
@@ -26,10 +31,12 @@ class ChatMessageHandler:
         graph_client: GraphClient,
         self_user_id: str = "",
         on_message: Optional[OnMessageCallback] = None,
+        on_card_action: Optional[OnCardActionCallback] = None,
     ):
         self._client = graph_client
         self._self_user_id = self_user_id
         self._on_message = on_message
+        self._on_card_action = on_card_action
 
     async def handle_notification(
         self, notification: dict[str, Any]
@@ -49,6 +56,15 @@ class ChatMessageHandler:
             logger.error("Failed to fetch message %s: %s", message_id, e)
             return None
 
+        # Check for card action responses BEFORE self-message filtering.
+        # Card action responses are posted by Teams (not our user), but we
+        # need to process them even when they come from the same user identity.
+        # The raw message body will contain the hermes_action payload.
+        if self._on_card_action and self._is_card_action_response(msg_data):
+            await self._on_card_action(chat_id, msg_data)
+            # Card actions are control messages — don't create a MessageEvent
+            return None
+
         chat_message = self._parse_message(chat_id, msg_data)
 
         sender_id = chat_message.raw.get("from", {}).get("user", {}).get("id", "")
@@ -60,6 +76,31 @@ class ChatMessageHandler:
         if self._on_message:
             await self._on_message(event)
         return event
+
+    @staticmethod
+    def _is_card_action_response(msg_data: dict[str, Any]) -> bool:
+        """Detect whether a message is a card ``Action.Submit`` response.
+
+        Checks the message body and attachments for hermes_action markers.
+        """
+        # Check attachments first — card action responses often carry
+        # the submit data in an Adaptive Card attachment.
+        for att in msg_data.get("attachments", []) or []:
+            ct = att.get("contentType", "")
+            content = att.get("content", "")
+            if isinstance(content, dict):
+                import json
+                content = json.dumps(content)
+            if isinstance(content, str) and _CARD_ACTION_RE.search(content):
+                return True
+
+        # Check the body content for embedded hermes_action JSON
+        body = msg_data.get("body", {})
+        body_content = body.get("content", "")
+        if isinstance(body_content, str) and _CARD_ACTION_RE.search(body_content):
+            return True
+
+        return False
 
     def _parse_message(self, chat_id: str, data: dict[str, Any]) -> TeamsChatMessage:
         sender_data = data.get("from", {}).get("user", {})

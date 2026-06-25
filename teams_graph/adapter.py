@@ -7,6 +7,11 @@ import logging
 import os
 from typing import Any, Dict, Optional
 
+import asyncio as _asyncio
+import json as _json
+import os as _os
+import re as _re
+
 from gateway.config import PlatformConfig, Platform
 from gateway.platforms.base import (
     BasePlatformAdapter,
@@ -75,6 +80,9 @@ class TeamsGraphAdapter(BasePlatformAdapter):
             graph_client=self._graph,
             self_user_id=self._self_user_id,
             on_message=lambda ev: asyncio.create_task(self.handle_message(ev)),
+            on_card_action=lambda chat_id, msg_data: asyncio.create_task(
+                self.handle_card_action(chat_id, msg_data)
+            ),
         )
 
         if self._notification_url and self._client_state:
@@ -152,6 +160,223 @@ class TeamsGraphAdapter(BasePlatformAdapter):
             return {"name": name, "chat_id": chat_id, "type": chat.get("chatType", "direct")}
         except Exception:
             return {"name": chat_id, "chat_id": chat_id, "type": "direct"}
+
+    # ── Adaptive Card Approvals ──────────────────────────────────────────
+
+    async def send_exec_approval(
+        self,
+        chat_id: str,
+        command: str,
+        session_key: str,
+        description: str = "dangerous command",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Send an Adaptive Card approval prompt with Allow/Deny buttons.
+
+        Mirrors the standard Teams plugin's ``send_exec_approval()`` but
+        uses Graph API instead of Bot Framework.  The card uses
+        ``Action.Submit`` buttons — when clicked, Teams posts the submit
+        data as a regular chat message that the subscription picks up.
+        """
+        if self._graph is None:
+            return SendResult(success=False, error="Not connected")
+
+        cmd_preview = command[:2000] + "..." if len(command) > 2000 else command
+        btn_data = {
+            "session_key": session_key,
+            "cmd": command[:200] + "..." if len(command) > 200 else command,
+            "desc": description,
+        }
+
+        card = {
+            "type": "AdaptiveCard",
+            "version": "1.4",
+            "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+            "body": [
+                {
+                    "type": "TextBlock",
+                    "text": "⚠️ Command Approval Required",
+                    "wrap": True,
+                    "weight": "Bolder",
+                    "size": "Medium",
+                },
+                {
+                    "type": "TextBlock",
+                    "text": f"```\n{cmd_preview}\n```",
+                    "wrap": True,
+                    "fontType": "Monospace",
+                    "spacing": "Medium",
+                },
+                {
+                    "type": "TextBlock",
+                    "text": f"Reason: {description}",
+                    "wrap": True,
+                    "isSubtle": True,
+                    "spacing": "Small",
+                },
+            ],
+            "actions": [
+                {
+                    "type": "Action.Submit",
+                    "title": "✅ Allow Once",
+                    "data": {
+                        **btn_data,
+                        "hermes_action": "approve_once",
+                    },
+                    "style": "positive",
+                },
+                {
+                    "type": "Action.Submit",
+                    "title": "🔄 Allow Session",
+                    "data": {
+                        **btn_data,
+                        "hermes_action": "approve_session",
+                    },
+                },
+                {
+                    "type": "Action.Submit",
+                    "title": "⭐ Always Allow",
+                    "data": {
+                        **btn_data,
+                        "hermes_action": "approve_always",
+                    },
+                },
+                {
+                    "type": "Action.Submit",
+                    "title": "❌ Deny",
+                    "data": {
+                        **btn_data,
+                        "hermes_action": "deny",
+                    },
+                    "style": "destructive",
+                },
+            ],
+        }
+
+        try:
+            result = await self._graph.send_chat_card(chat_id, card)
+            return SendResult(success=True, message_id=result.get("id"))
+        except Exception as e:
+            logger.error("send_exec_approval failed: %s", e, exc_info=True)
+            return SendResult(success=False, error=str(e), retryable=True)
+
+    async def handle_card_action(self, chat_id: str, message_data: dict[str, Any]) -> Optional[SendResult]:
+        """Process an incoming card-action response message.
+
+        Called by the message handler when a message looks like a card
+        ``Action.Submit`` response.  Detects the approval action, resolves
+        the gateway approval, and sends a confirmation card back.
+        """
+        attachments = message_data.get("attachments", [])
+        if not attachments:
+            return None
+
+        action_data: dict[str, Any] = {}
+        for att in attachments:
+            ct = att.get("contentType", "")
+            if ct == "application/vnd.microsoft.card.adaptive":
+                try:
+                    content = att.get("content", "{}")
+                    if isinstance(content, str):
+                        card_content = _json.loads(content)
+                    else:
+                        card_content = content
+                    # Look for submit data in the card body
+                    actions = card_content.get("actions", [])
+                    for action in actions:
+                        data = action.get("data", {})
+                        if data.get("hermes_action"):
+                            action_data = data
+                            break
+                except Exception:
+                    continue
+            # Also check for the raw submit data in invoke payloads
+            if ct == "application/vnd.microsoft.card.adaptive":
+                continue
+
+        if not action_data:
+            # Try extracting from the body content as fallback
+            body = message_data.get("body", {})
+            content = body.get("content", "")
+            if isinstance(content, str):
+                try:
+                    parsed = _json.loads(content)
+                    if isinstance(parsed, dict) and parsed.get("hermes_action"):
+                        action_data = parsed
+                except Exception:
+                    pass
+
+        if not action_data:
+            return None
+
+        return await self._process_card_action(chat_id, action_data)
+
+    async def _process_card_action(
+        self, chat_id: str, data: dict[str, Any]
+    ) -> SendResult:
+        """Resolve a card action and send a confirmation card."""
+        hermes_action = data.get("hermes_action", "")
+        session_key = data.get("session_key", "")
+
+        if not hermes_action or not session_key:
+            return SendResult(success=False, error="Missing action data")
+
+        choice_map = {
+            "approve_once": "once",
+            "approve_session": "session",
+            "approve_always": "always",
+            "deny": "deny",
+        }
+        choice = choice_map.get(hermes_action)
+        if not choice:
+            return SendResult(success=False, error=f"Unknown action: {hermes_action}")
+
+        from tools.approval import has_blocking_approval, resolve_gateway_approval
+
+        if not has_blocking_approval(session_key):
+            # Approval already resolved or expired — send info card
+            if self._graph:
+                expired_card = self._build_result_card(
+                    data, "⚠️ Approval already resolved or expired."
+                )
+                await self._graph.send_chat_card(chat_id, expired_card)
+            return SendResult(success=True, message_id="expired")
+
+        resolve_gateway_approval(session_key, choice)
+
+        label_map = {
+            "once": "✅ Allowed (once)",
+            "session": "✅ Allowed (session)",
+            "always": "✅ Always allowed",
+            "deny": "❌ Denied",
+        }
+        result_card = self._build_result_card(data, label_map[choice])
+
+        try:
+            result = await self._graph.send_chat_card(chat_id, result_card)
+            return SendResult(success=True, message_id=result.get("id"))
+        except Exception as e:
+            logger.error("Failed to send confirmation card: %s", e)
+            return SendResult(success=False, error=str(e))
+
+    @staticmethod
+    def _build_result_card(data: dict[str, Any], result_text: str) -> dict[str, Any]:
+        """Build a minimal confirmation card showing the approval result."""
+        cmd = data.get("cmd", "")
+        desc = data.get("desc", "")
+        body = [{"type": "TextBlock", "text": "⚠️ Command Approval Required", "wrap": True, "weight": "Bolder"}]
+        if cmd:
+            body.append({"type": "TextBlock", "text": f"```\n{cmd}\n```", "wrap": True, "fontType": "Monospace"})
+        if desc:
+            body.append({"type": "TextBlock", "text": f"Reason: {desc}", "wrap": True, "isSubtle": True})
+        body.append({"type": "TextBlock", "text": result_text, "wrap": True, "weight": "Bolder"})
+
+        return {
+            "type": "AdaptiveCard",
+            "version": "1.4",
+            "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+            "body": body,
+        }
 
 
 # ── Hooks ──────────────────────────────────────────────────────────────────
