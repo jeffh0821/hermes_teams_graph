@@ -90,6 +90,7 @@ class TeamsGraphAdapter(BasePlatformAdapter):
                 graph_client=self._graph,
                 notification_url=self._notification_url,
                 client_state=self._client_state,
+                on_renewal_tick=lambda: self._set_presence("Available"),
             )
             try:
                 await self._sub_mgr.subscribe_to_chats()
@@ -105,6 +106,9 @@ class TeamsGraphAdapter(BasePlatformAdapter):
             # Wire webhook notifications from msgraph_webhook to our handler
             await self._register_webhook_consumer()
 
+        # Set presence to Available
+        await self._set_presence("Available")
+
         self._mark_connected()
         return True
 
@@ -112,6 +116,8 @@ class TeamsGraphAdapter(BasePlatformAdapter):
         if self._sub_mgr:
             await self._sub_mgr.unsubscribe_all()
             await self._sub_mgr.stop_renewal_loop()
+        # Clear presence
+        await self._set_presence("Offline")
         if self._graph:
             await self._graph.__aexit__(None, None, None)
         self._mark_disconnected()
@@ -129,7 +135,26 @@ class TeamsGraphAdapter(BasePlatformAdapter):
         except Exception as e:
             logger.error("Failed to register webhook consumer: %s", e)
 
-    # ── Send ──────────────────────────────────────────────────────────────
+    async def _set_presence(self, availability: str) -> None:
+        """Update Teams presence via Graph API.
+
+        Valid values: Available, Away, Busy, DoNotDisturb, Offline.
+        The presence session expires after 1 hour; the subscription
+        renewal loop doubles as a presence keep-alive.
+        """
+        if self._graph is None:
+            return
+        try:
+            body = {
+                "sessionId": "cba17ea1-24d3-4159-85d5-237430e4bd6c",
+                "availability": availability,
+                "activity": availability,
+                "expirationDuration": "PT1H",
+            }
+            await self._graph.post("/me/presence/setPresence", body)
+            logger.info("Presence set to %s", availability)
+        except Exception as e:
+            logger.warning("Failed to set presence to %s: %s", availability, e)
 
     @staticmethod
     def _format_markdown_to_html(text: str) -> str:

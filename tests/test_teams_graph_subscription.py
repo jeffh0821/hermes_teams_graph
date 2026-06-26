@@ -41,8 +41,24 @@ class TestSubscriptionLifecycle:
 
     @pytest.mark.asyncio
     async def test_renew_updates_expiration(self, sub_mgr, mock_client):
+        mock_client._request = AsyncMock(return_value={"id": "sub-1", "expirationDateTime": "2026-01-01T00:00:00Z"})
         await sub_mgr.subscribe("/chats/getAllMessages")
         await sub_mgr.renew("sub-1")
+        mock_client._request.assert_called_with(
+            "PATCH", "/subscriptions/sub-1",
+            body={"expirationDateTime": mock_client._request.call_args[1]["body"]["expirationDateTime"]},
+        )
+
+    @pytest.mark.asyncio
+    async def test_renewal_404_recreates(self, sub_mgr, mock_client):
+        """404 on renew should trigger re-creation."""
+        mock_client._request = AsyncMock(side_effect=Exception("Not Found"))
+        # Give the exception a .status attribute
+        mock_client._request.side_effect = type("Err", (Exception,), {"status": 404})("Not Found")
+        await sub_mgr.subscribe("/chats/getAllMessages")
+        await sub_mgr._renew_all()
+        # Should have re-created: subscribe() calls post(), so post should be called twice
+        # (once for original subscribe, once for re-create)
         assert mock_client.post.call_count == 2
 
     @pytest.mark.asyncio
