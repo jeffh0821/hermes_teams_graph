@@ -175,11 +175,33 @@ class SubscriptionManager:
         """Subscribe to user-level chat lifecycle events (/me/chats).
 
         Uses delegated Chat.ReadBasic to receive created notifications
-        whenever Apollo is added to a new chat.  The webhook handler
-        (in adapter.py) dynamically subscribes to messages for the
-        new chat when the notification arrives.
+        whenever Apollo is added to a new chat.  Cleans up any stale
+        /me/chats subscriptions first (Microsoft enforces a hard limit
+        of 10 per user, and every restart would otherwise leak one).
         """
+        # Clean up old /me/chats subscriptions to avoid hitting the limit
+        await self._cleanup_subscriptions("/me/chats")
         return await self.subscribe("/me/chats", change_type="created")
+
+    async def _cleanup_subscriptions(self, resource: str) -> None:
+        """Delete all existing subscriptions for a given resource path."""
+        try:
+            existing = await self._client.get("/subscriptions")
+            for sub in existing.get("value", []):
+                if sub.get("resource", "") == resource:
+                    try:
+                        await self.unsubscribe(sub["id"])
+                        logger.info(
+                            "Cleaned up stale %s subscription %s",
+                            resource, sub["id"],
+                        )
+                    except Exception as e:
+                        logger.debug(
+                            "Could not delete subscription %s: %s",
+                            sub["id"], e,
+                        )
+        except Exception as e:
+            logger.warning("Failed to list subscriptions for cleanup: %s", e)
 
     async def subscribe_chat_messages(self, chat_id: str) -> dict[str, Any] | None:
         """Subscribe to messages for a single chat.  Called dynamically when
