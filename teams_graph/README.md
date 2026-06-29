@@ -1,8 +1,11 @@
 # Teams Graph Platform
 
-Full-identity Microsoft Teams via Microsoft Graph API. Apollo appears as a normal M365 user (`Apollo.AI@peigenesis.com`) — no bot framework, no @mention gating.
+Full-identity Microsoft Teams via Microsoft Graph API. Apollo appears as a normal M365 user (`Apollo.AI@peigenesis.com`) — no bot framework, no Azure Bot Service.
 
-**Status:** ✅ Production — connected, send/receive working, subscriptions self-healing, presence available.
+**@mention filtering:** Apollo reads ALL messages for context awareness but only responds when
+@mentioned in group/meeting chats. DMs (oneOnOne) always get a response.
+
+**Status:** ✅ Production — connected, send/receive working, subscriptions self-healing, @mention filtering active, presence available.
 
 ## Architecture
 
@@ -28,7 +31,8 @@ User → Teams → Graph notification → msgraph_webhook :8646 → teams_graph 
 
 ### Messaging
 - Send and receive messages as a full M365 user identity
-- No @mention required — messages appear directly from Apollo.AI
+- **@mention filtering:** In group/meeting chats, Apollo reads all messages for context but only responds when @mentioned directly
+- **DMs (oneOnOne):** always respond — no @mention needed
 - Teams markdown subset: bold, italic, inline code
 
 ### Subscription Lifecycle (Self-Healing)
@@ -108,13 +112,20 @@ platforms:
 
 - **Absorb msgraph_webhook** — embed HTTP listener directly, eliminate two-platform requirement
 - **Independent auth** — own token storage, no M365 skill dependency
-- **Channel support** — team channel subscriptions, @mention handling
+- **Channel support** — team channel subscriptions
 - **Adaptive Cards** — rich interactive responses
 - **Multi-resource subscriptions** — auto-subscribe to all joined teams' channels
 
+## Recent Fixes (Jun 29, 2026)
+
+- **@mention filter activated:** `_is_mentioned()` existed but was never called. Group/meeting messages now filtered.
+- **Source context fixed:** `chat_name` uses actual topic, `chat_type` correctly mapped from Graph API.
+- **Subscription timeout:** Parallel `asyncio.gather` replaces sequential loop (8s vs 25s for 4 chats).
+- **`NoneType` crash:** Fixed `chat.get('topic')[:40]` when topic is `None`.
+
 ## Troubleshooting
 
-**No response to messages:** Check `allow_all_users` or `allowed_users` is set.
+**No response to messages:** Check `allow_all_users` or `allowed_users` is set. In group chats, Apollo only responds to @mentions.
 
 **Presence shows Offline:** Token may lack `Presence.ReadWrite`. Re-auth M365 skill with the scope added.
 

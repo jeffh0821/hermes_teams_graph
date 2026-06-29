@@ -25,6 +25,11 @@ from .graph_client import GraphClient
 from .subscription_manager import SubscriptionManager
 from .message_handler import ChatMessageHandler
 
+# Use stderr so it's visible even if logging is broken
+import sys as _sys
+_sys.stderr.write("TEAMS_GRAPH adapter module loading...\n")
+_sys.stderr.flush()
+
 logger = logging.getLogger(__name__)
 
 PLATFORM_NAME = "teams_graph"
@@ -58,18 +63,26 @@ class TeamsGraphAdapter(BasePlatformAdapter):
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
     async def connect(self) -> bool:
+        _sys.stderr.write("teams_graph connect: enter\n"); _sys.stderr.flush()
         try:
+            _sys.stderr.write("teams_graph connect: get_token...\n"); _sys.stderr.flush()
             token = await self._tp.get_token(allow_device_code=False)
+            _sys.stderr.write("teams_graph connect: token ok\n"); _sys.stderr.flush()
             logger.info("Teams Graph authenticated")
         except Exception as e:
+            _sys.stderr.write(f"teams_graph connect: auth FAILED {e}\n"); _sys.stderr.flush()
             logger.error("Teams Graph auth failed: %s", e)
             return False
 
+        _sys.stderr.write("teams_graph connect: creating graph client\n"); _sys.stderr.flush()
         self._graph = GraphClient(self._tp)
         await self._graph.__aenter__()
+        _sys.stderr.write("teams_graph connect: graph client ready\n"); _sys.stderr.flush()
 
         try:
+            _sys.stderr.write("teams_graph connect: get_me...\n"); _sys.stderr.flush()
             me = await self._graph.get_me()
+            _sys.stderr.write(f"teams_graph connect: get_me ok ({me.get('displayName')})\n"); _sys.stderr.flush()
             self._self_user_id = me.get("id", "")
             logger.info("Connected as %s (%s)", me.get("displayName"), me.get("userPrincipalName"))
         except Exception as e:
@@ -84,8 +97,10 @@ class TeamsGraphAdapter(BasePlatformAdapter):
                 self.handle_approval_command(chat_id, text)
             ),
         )
+        _sys.stderr.write(f"teams_graph connect: chat_handler ready, notification_url={bool(self._notification_url)}, client_state={bool(self._client_state)}\n"); _sys.stderr.flush()
 
         if self._notification_url and self._client_state:
+            _sys.stderr.write("teams_graph connect: creating sub_mgr...\n"); _sys.stderr.flush()
             self._sub_mgr = SubscriptionManager(
                 graph_client=self._graph,
                 notification_url=self._notification_url,
@@ -93,10 +108,15 @@ class TeamsGraphAdapter(BasePlatformAdapter):
                 on_renewal_tick=lambda: self._set_presence("Available"),
             )
             try:
+                _sys.stderr.write("teams_graph connect: subscribe_to_chats...\n"); _sys.stderr.flush()
                 await self._sub_mgr.subscribe_to_chats()
+                _sys.stderr.write("teams_graph connect: subscribe_to_chat_lifecycle...\n"); _sys.stderr.flush()
                 await self._sub_mgr.subscribe_to_chat_lifecycle()
+                _sys.stderr.write("teams_graph connect: start_renewal_loop...\n"); _sys.stderr.flush()
                 await self._sub_mgr.start_renewal_loop()
+                _sys.stderr.write("teams_graph connect: subscriptions done\n"); _sys.stderr.flush()
             except Exception as e:
+                _sys.stderr.write(f"teams_graph connect: subs FAILED {e}\n"); _sys.stderr.flush()
                 logger.warning(
                     "Failed to create Graph subscriptions: %s. "
                     "The platform can send messages but will not receive them. "
@@ -106,8 +126,11 @@ class TeamsGraphAdapter(BasePlatformAdapter):
 
             # Wire webhook notifications from msgraph_webhook to our handler
             await self._register_webhook_consumer()
+        else:
+            _sys.stderr.write("teams_graph connect: skipping subs (no notification_url or client_state)\n"); _sys.stderr.flush()
 
         # Set presence to Available
+        _sys.stderr.write("teams_graph connect: setting presence...\n"); _sys.stderr.flush()
         await self._set_presence("Available")
 
         self._mark_connected()

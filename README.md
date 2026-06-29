@@ -2,9 +2,11 @@
 
 A [Hermes Agent](https://github.com/NousResearch/hermes-agent) platform plugin that integrates Microsoft Teams as a native messaging channel via Microsoft Graph API.
 
-Apollo appears as a normal M365 user — no bot framework, no @mention gating. Send and receive messages in DMs, group chats, and channels using the authenticated user identity.
+Apollo appears as a normal M365 user — no bot framework, no Azure Bot Service. Messages come directly from `Apollo.AI@peigenesis.com`.
 
-**Status:** ✅ Production — connected, send/receive working, subscriptions self-healing, presence available.
+**@mention filtering:** Apollo reads ALL messages for context awareness but only responds when @mentioned in group/meeting chats. DMs (oneOnOne) always get a response.
+
+**Status:** ✅ Production — connected, send/receive working, subscriptions self-healing, @mention filtering active, presence available.
 
 ## Architecture
 
@@ -80,7 +82,8 @@ The plugin resolves tokens in order:
 
 ### Messaging
 - Send and receive messages as a full M365 user identity
-- No @mention required — messages appear directly from Apollo.AI
+- **@mention filtering:** In group/meeting chats, Apollo reads all messages for context but only responds when @mentioned directly
+- **DMs (oneOnOne):** always respond — no @mention needed
 - Teams markdown subset: bold, italic, inline code
 
 ### Subscription Lifecycle (Self-Healing)
@@ -133,11 +136,22 @@ tests/
 pytest tests/test_teams_graph_*.py
 ```
 
+## Recent Fixes
+
+### Jun 29, 2026
+- **@mention filter activated:** `_is_mentioned()` existed but was never called. Now group/meeting chat messages are filtered — Apollo only responds when @mentioned. DMs pass through always.
+- **Source context fixed:** `chat_name` was `msg.chat_id[:20]` (raw ID snippet); now uses actual chat topic or `"DM: <name>"`. `chat_type` was always `"direct"` (all Teams IDs contain `:`); now correctly maps `oneOnOne→direct`, `group/meeting→group`.
+- **Subscription timeout resolved:** Sequential subscription creation hit 30s gateway timeout. Now uses `asyncio.gather` for parallel creation (8s for 4 chats). Fixed `NoneType` crash when `topic=None` (3/4 chats have no topic).
+- **Subscription leaks cleaned:** 6 stale subscriptions from prior failed connects deleted via Graph API.
+
 ## Roadmap
 
+- [x] @mention filtering — respond only when @mentioned in group/meeting chats
+- [x] Parallel subscription creation — `asyncio.gather` for faster connects
+- [x] Source context — proper chat names and speaker identification
 - [ ] Absorb `msgraph_webhook` — embed HTTP listener, eliminate two-platform requirement
 - [ ] Independent auth — own token storage, no M365 skill dependency
-- [ ] Channel support — team channel subscriptions, @mention handling
+- [ ] Channel support — team channel subscriptions
 - [ ] Multi-resource subscriptions — auto-subscribe to all joined teams' channels
 
 ## License

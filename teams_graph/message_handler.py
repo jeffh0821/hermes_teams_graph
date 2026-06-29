@@ -49,6 +49,22 @@ class ChatMessageHandler:
         self._self_user_id = self_user_id
         self._on_message = on_message
         self._on_approval_command = on_approval_command
+        self._chat_meta: dict[str, dict[str, str]] = {}  # chat_id → {type, topic}
+
+    async def _get_chat_meta(self, chat_id: str) -> dict[str, str]:
+        """Fetch and cache chat type and topic. Returns {'type': ..., 'topic': ...}."""
+        if chat_id in self._chat_meta:
+            return self._chat_meta[chat_id]
+        try:
+            chat = await self._client.get_chat(chat_id)
+            meta = {
+                "type": chat.get("chatType", "unknown"),
+                "topic": chat.get("topic") or "",
+            }
+        except Exception:
+            meta = {"type": "unknown", "topic": ""}
+        self._chat_meta[chat_id] = meta
+        return meta
 
     async def handle_notification(
         self, notification: dict[str, Any]
@@ -86,7 +102,20 @@ class ChatMessageHandler:
             logger.debug("Skipping own message %s", message_id)
             return None
 
-        event = self._to_message_event(chat_message)
+        # ── @mention filter for group/meeting chats ──────────────────────
+        chat_meta = await self._get_chat_meta(chat_id)
+        chat_type = chat_meta.get("type", "unknown")
+
+        if chat_type not in ("oneOnOne",):
+            # Group chat or meeting — only respond when @mentioned
+            if not _is_mentioned(msg_data, self._self_user_id):
+                logger.debug(
+                    "Skipping unmentioned message in %s chat %s",
+                    chat_type, chat_meta.get("topic", chat_id)[:40],
+                )
+                return None
+
+        event = self._to_message_event(chat_message, chat_meta)
         if self._on_message:
             await self._on_message(event)
         return event
@@ -105,15 +134,35 @@ class ChatMessageHandler:
             raw=data,
         )
 
-    def _to_message_event(self, msg: TeamsChatMessage) -> MessageEvent:
+    def _to_message_event(self, msg: TeamsChatMessage, chat_meta: dict[str, str] | None = None) -> MessageEvent:
         from gateway.session import SessionSource
         from gateway.config import Platform
+
+        if chat_meta is None:
+            chat_meta = {}
+
+        chat_topic = chat_meta.get("topic") or ""
+        chat_type = chat_meta.get("type", "unknown")
+
+        # Map Graph chatType to SessionSource chat_type
+        type_map = {"oneOnOne": "direct", "group": "group", "meeting": "group"}
+        session_chat_type = type_map.get(chat_type, "group")
+
+        # Build a human-readable chat name
+        if chat_topic:
+            chat_name = chat_topic
+        elif chat_type == "oneOnOne":
+            chat_name = f"DM: {msg.sender.display_name if msg.sender else 'User'}"
+        elif chat_type == "meeting":
+            chat_name = "Meeting Chat"
+        else:
+            chat_name = "Group Chat"
 
         source = SessionSource(
             platform=Platform("teams_graph"),
             chat_id=msg.chat_id,
-            chat_name=msg.chat_id[:20],
-            chat_type="direct" if ":" in msg.chat_id else "group",
+            chat_name=chat_name,
+            chat_type=session_chat_type,
             user_id=msg.sender.id if msg.sender else "unknown",
             user_name=msg.sender.display_name if msg.sender else "Unknown",
         )

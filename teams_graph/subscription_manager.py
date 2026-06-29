@@ -14,6 +14,8 @@ new chat — no polling required.
 
 import asyncio
 import logging
+import sys as _sys
+import time as _time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional, Callable
 
@@ -59,7 +61,9 @@ class SubscriptionManager:
             "clientState": self._client_state,
             "latestSupportedTlsVersion": "v1_3",
         }
+        _sys.stderr.write(f"teams_graph sub: POST /subscriptions for {resource}...\n"); _sys.stderr.flush()
         result = await self._client.post("/subscriptions", body)
+        _sys.stderr.write(f"teams_graph sub: POST done, result type={type(result).__name__}, has_id={'id' in (result or {})}\n"); _sys.stderr.flush()
         sub_id = result["id"]
         self._subscriptions[sub_id] = result
         self._resources[sub_id] = resource
@@ -155,20 +159,45 @@ class SubscriptionManager:
 
     async def subscribe_to_chats(self) -> list[dict[str, Any]]:
         """Subscribe to all chat messages for the authenticated user."""
-        results = []
+        t0 = _time.monotonic()
+        _sys.stderr.write(f"teams_graph sub: list_chats...\n"); _sys.stderr.flush()
         chats = await self._client.list_chats()
+        t1 = _time.monotonic()
+        _sys.stderr.write(f"teams_graph sub: list_chats done ({len(chats)} chats in {t1-t0:.1f}s)\n"); _sys.stderr.flush()
+
+        valid_chats = []
         for chat in chats:
             chat_id = chat.get("id", "")
             if not chat_id:
                 continue
             self._known_chat_ids.add(chat_id)
+            valid_chats.append(chat)
+
+        if not valid_chats:
+            return []
+
+        async def _sub_one(chat):
+            chat_id = chat["id"]
+            label = (chat.get("topic") or chat_id)[:40]
             try:
+                t_sub0 = _time.monotonic()
                 result = await self.subscribe(f"/chats/{chat_id}/messages")
-                results.append(result)
+                t_sub1 = _time.monotonic()
+                _sys.stderr.write(f"teams_graph sub: subscribed {label} ({t_sub1-t_sub0:.1f}s)\n"); _sys.stderr.flush()
                 logger.info("Subscribed to chat %s", chat.get("topic", chat_id))
+                return result
             except Exception as e:
+                _sys.stderr.write(f"teams_graph sub: FAILED {label}: {e}\n"); _sys.stderr.flush()
                 logger.error("Failed to subscribe to chat %s: %s",
                              chat.get("topic", chat_id), e)
+                return None
+
+        _sys.stderr.write(f"teams_graph sub: creating {len(valid_chats)} subscriptions in parallel...\n"); _sys.stderr.flush()
+        results_raw = await asyncio.gather(*[_sub_one(c) for c in valid_chats])
+        results = [r for r in results_raw if r is not None]
+
+        t_end = _time.monotonic()
+        _sys.stderr.write(f"teams_graph sub: subscribe_to_chats DONE ({len(results)}/{len(valid_chats)} ok in {t_end-t0:.1f}s)\n"); _sys.stderr.flush()
         return results
 
     async def subscribe_to_chat_lifecycle(self) -> dict[str, Any]:
@@ -180,8 +209,16 @@ class SubscriptionManager:
         of 10 per user, and every restart would otherwise leak one).
         """
         # Clean up old /me/chats subscriptions to avoid hitting the limit
+        _sys.stderr.write("teams_graph sub: lifecycle: cleanup...\n"); _sys.stderr.flush()
+        t0 = _time.monotonic()
         await self._cleanup_subscriptions("/me/chats")
-        return await self.subscribe("/me/chats", change_type="created")
+        t1 = _time.monotonic()
+        _sys.stderr.write(f"teams_graph sub: lifecycle: cleanup done ({t1-t0:.1f}s)\n"); _sys.stderr.flush()
+        _sys.stderr.write("teams_graph sub: lifecycle: subscribe /me/chats...\n"); _sys.stderr.flush()
+        result = await self.subscribe("/me/chats", change_type="created")
+        t2 = _time.monotonic()
+        _sys.stderr.write(f"teams_graph sub: lifecycle: subscribe done ({t2-t1:.1f}s, total {t2-t0:.1f}s)\n"); _sys.stderr.flush()
+        return result
 
     async def _cleanup_subscriptions(self, resource: str) -> None:
         """Delete all existing subscriptions for a given resource path."""
