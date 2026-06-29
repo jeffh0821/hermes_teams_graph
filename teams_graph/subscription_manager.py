@@ -5,6 +5,11 @@ We auto-renew at 55 minutes to prevent gaps. Expired / missing
 subscriptions are re-created automatically during the renewal cycle
 so the platform is self-healing across gateway restarts and token
 rotation.
+
+New-chat detection: a /me/chats subscription (delegated Chat.ReadBasic)
+fires created notifications via webhook whenever Apollo is added to a
+chat.  The webhook handler dynamically subscribes to messages for the
+new chat — no polling required.
 """
 
 import asyncio
@@ -38,14 +43,16 @@ class SubscriptionManager:
         self._renewal_task: Optional[asyncio.Task] = None
         self._consecutive_failures: dict[str, int] = {}
         self._on_renewal_tick = on_renewal_tick
+        self._known_chat_ids: set[str] = set()
 
     async def subscribe(
-        self, resource: str = "/communications/callRecords/getAllMessages"
+        self, resource: str = "/communications/callRecords/getAllMessages",
+        change_type: str = "created,updated",
     ) -> dict[str, Any]:
         """Create a subscription."""
         expiration = datetime.now(timezone.utc) + timedelta(minutes=SUBSCRIPTION_LIFETIME_MINUTES)
         body = {
-            "changeType": "created,updated",
+            "changeType": change_type,
             "notificationUrl": self._notification_url,
             "resource": resource,
             "expirationDateTime": expiration.isoformat(),
@@ -154,6 +161,7 @@ class SubscriptionManager:
             chat_id = chat.get("id", "")
             if not chat_id:
                 continue
+            self._known_chat_ids.add(chat_id)
             try:
                 result = await self.subscribe(f"/chats/{chat_id}/messages")
                 results.append(result)
@@ -162,6 +170,29 @@ class SubscriptionManager:
                 logger.error("Failed to subscribe to chat %s: %s",
                              chat.get("topic", chat_id), e)
         return results
+
+    async def subscribe_to_chat_lifecycle(self) -> dict[str, Any]:
+        """Subscribe to user-level chat lifecycle events (/me/chats).
+
+        Uses delegated Chat.ReadBasic to receive created notifications
+        whenever Apollo is added to a new chat.  The webhook handler
+        (in adapter.py) dynamically subscribes to messages for the
+        new chat when the notification arrives.
+        """
+        return await self.subscribe("/me/chats", change_type="created")
+
+    async def subscribe_chat_messages(self, chat_id: str) -> dict[str, Any] | None:
+        """Subscribe to messages for a single chat.  Called dynamically when
+        a new chat lifecycle notification arrives.
+        """
+        try:
+            self._known_chat_ids.add(chat_id)
+            result = await self.subscribe(f"/chats/{chat_id}/messages")
+            logger.info("Dynamically subscribed to new chat %s", chat_id)
+            return result
+        except Exception as e:
+            logger.error("Failed to subscribe to new chat %s: %s", chat_id, e)
+            return None
 
     async def subscribe_to_all_joined_teams(self) -> list[dict[str, Any]]:
         """Subscribe to channel messages for all teams the user has joined."""

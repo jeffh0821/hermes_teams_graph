@@ -76,8 +76,10 @@ class GraphClient:
                         continue
                     resp.raise_for_status()
                     # Read body INSIDE the async with — the connection is still open
-                    # 204 No Content has no body (common for DELETE operations)
-                    if resp.status == 204:
+                    # 204 No Content has no body (common for DELETE operations).
+                    # Some endpoints (e.g. /me/presence/setPresence) return 200
+                    # with an empty body — handle those gracefully too.
+                    if resp.status == 204 or getattr(resp, 'content_length', None) == 0:
                         return {}
                     return await resp.json()
             except aiohttp.ClientResponseError as e:

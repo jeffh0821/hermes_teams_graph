@@ -94,12 +94,13 @@ class TeamsGraphAdapter(BasePlatformAdapter):
             )
             try:
                 await self._sub_mgr.subscribe_to_chats()
+                await self._sub_mgr.subscribe_to_chat_lifecycle()
                 await self._sub_mgr.start_renewal_loop()
             except Exception as e:
                 logger.warning(
                     "Failed to create Graph subscriptions: %s. "
                     "The platform can send messages but will not receive them. "
-                    "Add Chat.Read.All permission to the Azure app registration.",
+                    "Add Chat.ReadBasic or Chat.Read permission to the Azure app registration.",
                     e,
                 )
 
@@ -114,8 +115,8 @@ class TeamsGraphAdapter(BasePlatformAdapter):
 
     async def disconnect(self) -> None:
         if self._sub_mgr:
-            await self._sub_mgr.unsubscribe_all()
             await self._sub_mgr.stop_renewal_loop()
+            await self._sub_mgr.unsubscribe_all()
         # Clear presence
         await self._set_presence("Offline")
         if self._graph:
@@ -126,8 +127,30 @@ class TeamsGraphAdapter(BasePlatformAdapter):
         """Register with the msgraph_webhook to receive chat notifications."""
         try:
             from gateway.platforms.msgraph_webhook import _plugin_notification_handlers
+            import re as _re
+
+            _LIFECYCLE_RE = _re.compile(
+                r"chats[/\\\(](?P<chat_id>[^/)]+)[/\\\)]?$"
+            )
 
             async def on_notification(notification: dict, event):
+                resource = notification.get("resource", "")
+                change_type = notification.get("changeType", "updated")
+
+                # Detect chat lifecycle notifications (created/updated/deleted)
+                # vs message notifications (resource contains /messages)
+                if "/messages" not in resource:
+                    lifecycle_match = _LIFECYCLE_RE.search(resource)
+                    if lifecycle_match and change_type == "created":
+                        chat_id = lifecycle_match.group("chat_id").strip("'()")
+                        logger.info(
+                            "Chat lifecycle notification: chat %s created — "
+                            "subscribing to messages", chat_id,
+                        )
+                        if self._sub_mgr:
+                            await self._sub_mgr.subscribe_chat_messages(chat_id)
+                    return  # lifecycle notifications don't need message processing
+
                 await self._chat_handler.handle_notification(notification)
 
             _plugin_notification_handlers.append(on_notification)
