@@ -161,17 +161,22 @@ class TeamsGraphAdapter(BasePlatformAdapter):
     async def _set_presence(self, availability: str) -> None:
         """Update Teams presence via Graph API.
 
-        Valid values: Available, Away, Busy, DoNotDisturb, Offline.
+        Valid availability values: Available, Away, Busy, DoNotDisturb, Offline.
+        Activity must be a valid activity string; "Offline" is not a valid
+        activity, so we map it to "OffWork".
         The presence session expires after 1 hour; the subscription
         renewal loop doubles as a presence keep-alive.
         """
         if self._graph is None:
             return
         try:
+            # "Offline" is a valid availability but NOT a valid activity.
+            # Map to a valid activity value (OffWork is the closest).
+            activity = "OffWork" if availability == "Offline" else availability
             body = {
                 "sessionId": "cba17ea1-24d3-4159-85d5-237430e4bd6c",
                 "availability": availability,
-                "activity": availability,
+                "activity": activity,
                 "expirationDuration": "PT1H",
             }
             await self._graph.post("/me/presence/setPresence", body)

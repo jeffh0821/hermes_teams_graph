@@ -2,16 +2,11 @@
 
 from __future__ import annotations
 
+import aiohttp
 import asyncio
 import logging
 from typing import Any, Optional
 from urllib.parse import urljoin
-
-try:
-    import aiohttp
-    AIOHTTP_AVAILABLE = True
-except ImportError:
-    AIOHTTP_AVAILABLE = False
 
 from .auth import TokenProvider
 
@@ -30,7 +25,8 @@ class GraphClient:
         self._session: Optional[aiohttp.ClientSession] = None
 
     async def __aenter__(self):
-        self._session = aiohttp.ClientSession()
+        timeout = aiohttp.ClientTimeout(total=30, connect=10)
+        self._session = aiohttp.ClientSession(timeout=timeout)
         return self
 
     async def __aexit__(self, *args):
