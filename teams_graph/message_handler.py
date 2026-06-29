@@ -86,16 +86,6 @@ class ChatMessageHandler:
             logger.debug("Skipping own message %s", message_id)
             return None
 
-        # In group chats, only respond to @mentions.  Apollo can still
-        # read everything for context, but won't chime in unless addressed.
-        chat_type = msg_data.get("chatType", "")
-        is_group = chat_type == "group"
-        if is_group and not _is_mentioned(msg_data, self._self_user_id):
-            logger.debug(
-                "Skipping group message %s — Apollo not @mentioned", message_id,
-            )
-            return None
-
         event = self._to_message_event(chat_message)
         if self._on_message:
             await self._on_message(event)
