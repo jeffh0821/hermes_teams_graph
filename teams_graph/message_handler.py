@@ -24,6 +24,17 @@ _APPROVAL_CMD_RE = re.compile(
 )
 
 
+def _is_mentioned(msg_data: dict[str, Any], self_user_id: str) -> bool:
+    """Return True if self_user_id appears in the message's mentions array."""
+    if not self_user_id:
+        return False
+    for mention in msg_data.get("mentions", []) or []:
+        mentioned_user = mention.get("mentioned", {}).get("user", {})
+        if mentioned_user.get("id") == self_user_id:
+            return True
+    return False
+
+
 class ChatMessageHandler:
     """Fetches chat messages from Graph and converts to Hermes events."""
 
@@ -73,6 +84,16 @@ class ChatMessageHandler:
         sender_id = chat_message.raw.get("from", {}).get("user", {}).get("id", "")
         if sender_id and sender_id == self._self_user_id:
             logger.debug("Skipping own message %s", message_id)
+            return None
+
+        # In group chats, only respond to @mentions.  Apollo can still
+        # read everything for context, but won't chime in unless addressed.
+        chat_type = msg_data.get("chatType", "")
+        is_group = chat_type == "group"
+        if is_group and not _is_mentioned(msg_data, self._self_user_id):
+            logger.debug(
+                "Skipping group message %s — Apollo not @mentioned", message_id,
+            )
             return None
 
         event = self._to_message_event(chat_message)
